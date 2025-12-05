@@ -96,6 +96,101 @@ def format_amount(amt): return str(int(amt * 100)).zfill(12)
 def mask_pan(pan): return pan[:6] + "****" + pan[-4:] if len(pan) >= 12 else pan
 
 # ============================================================================
+# API CLIENT - Supports both Simulator and Real API
+# ============================================================================
+
+import requests
+
+class ISO8583Client:
+    """Client for ISO8583 API - supports simulator mode and real API"""
+    
+    def __init__(self, base_url: str, use_simulator: bool = True, api_token: str = None, 
+                 username: str = None, password: str = None):
+        self.base_url = base_url.rstrip('/')
+        self.use_simulator = use_simulator
+        self.api_token = api_token
+        self.session = requests.Session()
+        
+        # Set headers
+        self.session.headers.update({
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        })
+        
+        # Authentication options
+        if api_token:
+            self.session.headers["Authorization"] = f"Bearer {api_token}"
+        elif username and password:
+            self.session.auth = (username, password)
+    
+    def send_transaction(self, template_name: str, overrides: Dict[str, str], 
+                         endpoint: str = "/api/v1/iso8583/authorize") -> Dict:
+        """Send ISO8583 0100 transaction"""
+        if self.use_simulator:
+            return simulate_transaction(template_name, overrides)
+        else:
+            return self._send_real_request(template_name, overrides, endpoint)
+    
+    def _send_real_request(self, template_name: str, overrides: Dict[str, str], 
+                           endpoint: str) -> Dict:
+        """Send request to real API endpoint"""
+        try:
+            template = TEMPLATES.get(template_name)
+            if not template:
+                return {"error": f"Template '{template_name}' not found", "status": 404}
+            
+            merged_fields = template.apply_overrides(overrides)
+            
+            if "DE11" not in overrides:
+                merged_fields["DE11"] = generate_stan()
+            if "DE37" not in overrides:
+                merged_fields["DE37"] = generate_rrn()
+            
+            # Request payload - adjust based on your API format
+            payload = {
+                "templateName": template_name,
+                "overrides": overrides,
+                "message": merged_fields
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}{endpoint}",
+                json=payload,
+                timeout=30
+            )
+            
+            result = {
+                "status": response.status_code,
+                "raw_response": response.text
+            }
+            
+            if response.status_code == 200:
+                try:
+                    result.update(response.json())
+                except:
+                    result["data"] = response.text
+            else:
+                result["error"] = f"API Error: {response.status_code}"
+            
+            return result
+                
+        except requests.exceptions.ConnectionError:
+            return {"error": "Connection failed - check if API is running", "status": 503}
+        except requests.exceptions.Timeout:
+            return {"error": "Request timeout", "status": 504}
+        except Exception as e:
+            return {"error": str(e), "status": 500}
+    
+    def test_connection(self) -> bool:
+        """Test if API is reachable"""
+        try:
+            response = self.session.get(f"{self.base_url}/health", timeout=5)
+            return response.status_code < 500
+        except:
+            return False
+
+
+# ============================================================================
 # PAGE CONFIG & CSS
 # ============================================================================
 
@@ -314,8 +409,78 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.markdown("### ⚙️ Settings")
-        base_url = st.text_input("Base URL", "http://localhost:8080")
+        st.markdown("### ⚙️ API Configuration")
+        
+        # Mode selection
+        api_mode = st.radio(
+            "Mode",
+            ["🔧 Simulator (No API needed)", "🌐 Real API"],
+            help="Simulator mode works offline. Real API connects to your server."
+        )
+        use_simulator = "Simulator" in api_mode
+        
+        base_url = st.text_input(
+            "API Base URL", 
+            "http://localhost:8080",
+            disabled=use_simulator
+        )
+        
+        # Authentication (only for Real API mode)
+        api_token = None
+        api_username = None
+        api_password = None
+        
+        if not use_simulator:
+            st.markdown("---")
+            st.markdown("### 🔐 Authentication")
+            
+            auth_type = st.selectbox(
+                "Auth Type",
+                ["None", "Bearer Token", "Basic Auth", "API Key"]
+            )
+            
+            if auth_type == "Bearer Token":
+                api_token = st.text_input("Bearer Token", type="password")
+            elif auth_type == "Basic Auth":
+                api_username = st.text_input("Username")
+                api_password = st.text_input("Password", type="password")
+            elif auth_type == "API Key":
+                api_token = st.text_input("API Key", type="password")
+            
+            # Custom endpoint
+            custom_endpoint = st.text_input(
+                "Endpoint Path",
+                "/api/v1/iso8583/authorize",
+                help="The API endpoint for authorization requests"
+            )
+            
+            # Test connection button
+            if st.button("🔌 Test Connection"):
+                client = ISO8583Client(
+                    base_url=base_url,
+                    use_simulator=False,
+                    api_token=api_token,
+                    username=api_username,
+                    password=api_password
+                )
+                if client.test_connection():
+                    st.success("✅ Connected!")
+                else:
+                    st.error("❌ Connection failed")
+        else:
+            custom_endpoint = "/api/v1/iso8583/authorize"
+        
+        # Store in session state
+        st.session_state.api_config = {
+            "use_simulator": use_simulator,
+            "base_url": base_url,
+            "api_token": api_token,
+            "username": api_username,
+            "password": api_password,
+            "endpoint": custom_endpoint
+        }
+        
+        st.markdown("---")
         st.markdown("### 📋 Templates")
         selected_tpl = st.selectbox("Select Template", list(TEMPLATES.keys()))
     
@@ -344,8 +509,31 @@ def main():
             if ovr_term: overrides["DE41"] = ovr_term
             
             if st.button("🚀 SEND", use_container_width=True):
-                result = simulate_transaction(selected_tpl, overrides)
+                # Get API config from session state
+                cfg = st.session_state.get("api_config", {})
+                
+                # Create client
+                client = ISO8583Client(
+                    base_url=cfg.get("base_url", "http://localhost:8080"),
+                    use_simulator=cfg.get("use_simulator", True),
+                    api_token=cfg.get("api_token"),
+                    username=cfg.get("username"),
+                    password=cfg.get("password")
+                )
+                
+                # Send transaction
+                result = client.send_transaction(
+                    template_name=selected_tpl,
+                    overrides=overrides,
+                    endpoint=cfg.get("endpoint", "/api/v1/iso8583/authorize")
+                )
                 st.session_state.result = result
+                
+                # Show mode indicator
+                if cfg.get("use_simulator", True):
+                    st.info("📍 Using Simulator Mode")
+                else:
+                    st.info(f"📍 Sent to: {cfg.get('base_url')}")
         
         with col2:
             st.markdown("#### Result")
