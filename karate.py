@@ -1,1406 +1,1186 @@
 """
-ISO8583 COSMOS Studio Pro - Modern Professional UI
-===================================================
-Clean, professional design with light theme
+🥋 AI Karate Test Generator Pro
+================================
+- Train on your existing Karate feature files
+- Add custom templates and transaction types
+- Generate tests from natural language prompts
+- Learn from your repository structure
 """
 
 import streamlit as st
 import json
-import copy
+import re
+import os
 from datetime import datetime
-from typing import Dict, List, Any, Tuple
-from dataclasses import dataclass
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass, field, asdict
 import random
 import string
-from enum import Enum
-
-try:
-    import requests
-    HAS_REQUESTS = True
-except:
-    HAS_REQUESTS = False
 
 # ============================================================================
-# CONFIGURATION & CONSTANTS
-# ============================================================================
-
-class ValidationStatus(Enum):
-    PASS = "PASS"
-    FAIL = "FAIL"
-    WARN = "WARN"
-
-RESPONSE_CODES = {
-    "00": {"message": "Approved", "type": "approved", "icon": "✅", "color": "#10B981"},
-    "01": {"message": "Refer to Issuer", "type": "declined", "icon": "❌", "color": "#EF4444"},
-    "05": {"message": "Do Not Honor", "type": "declined", "icon": "❌", "color": "#EF4444"},
-    "14": {"message": "Invalid Card", "type": "declined", "icon": "❌", "color": "#EF4444"},
-    "51": {"message": "Insufficient Funds", "type": "declined", "icon": "❌", "color": "#EF4444"},
-    "54": {"message": "Expired Card", "type": "declined", "icon": "❌", "color": "#EF4444"},
-    "61": {"message": "Exceeds Limit", "type": "declined", "icon": "❌", "color": "#EF4444"},
-    "62": {"message": "Restricted Card", "type": "declined", "icon": "❌", "color": "#EF4444"},
-}
-
-# PPH_TRAN SCHEMA
-PPH_TRAN_SCHEMA = {
-    "table_name": "PPH_TRAN",
-    "description": "Primary Payment Hub Transaction Table",
-    "columns": {
-        "TRAN_ID": {"type": "VARCHAR2(36)", "desc": "Transaction ID (UUID)"},
-        "MSG_TYPE": {"type": "VARCHAR2(4)", "desc": "Message Type (0100, 0110)"},
-        "PAN": {"type": "VARCHAR2(19)", "desc": "Primary Account Number (masked)"},
-        "PROC_CODE": {"type": "VARCHAR2(6)", "desc": "Processing Code"},
-        "TXN_AMT": {"type": "NUMBER(15,2)", "desc": "Transaction Amount"},
-        "STAN": {"type": "VARCHAR2(6)", "desc": "System Trace Audit Number"},
-        "RRN": {"type": "VARCHAR2(12)", "desc": "Retrieval Reference Number"},
-        "AUTH_CODE": {"type": "VARCHAR2(6)", "desc": "Authorization Code"},
-        "RESP_CODE": {"type": "VARCHAR2(2)", "desc": "Response Code"},
-        "TERM_ID": {"type": "VARCHAR2(8)", "desc": "Terminal ID"},
-        "MERCHANT_ID": {"type": "VARCHAR2(15)", "desc": "Merchant ID"},
-        "MCC": {"type": "VARCHAR2(4)", "desc": "Merchant Category Code"},
-        "TXN_STATUS": {"type": "VARCHAR2(20)", "desc": "Transaction Status"},
-        "CREATED_DT": {"type": "TIMESTAMP", "desc": "Record Creation Date"},
-        "CARD_TYPE": {"type": "VARCHAR2(20)", "desc": "Card Type (VISA, MC)"},
-    }
-}
-
-# PPDSVA SCHEMA
-PPDSVA_SCHEMA = {
-    "table_name": "PPDSVA",
-    "description": "Payment Processing Data Store - Value Added",
-    "columns": {
-        "SVA_ID": {"type": "VARCHAR2(36)", "desc": "SVA Record ID"},
-        "TRAN_ID": {"type": "VARCHAR2(36)", "desc": "Related Transaction ID"},
-        "RRN": {"type": "VARCHAR2(12)", "desc": "Retrieval Reference Number"},
-        "STAN": {"type": "VARCHAR2(6)", "desc": "System Trace Audit Number"},
-        "AUTH_CODE": {"type": "VARCHAR2(6)", "desc": "Authorization Code"},
-        "NETWORK_ID": {"type": "VARCHAR2(10)", "desc": "Network Identifier"},
-        "NETWORK_RESP": {"type": "VARCHAR2(100)", "desc": "Network Response"},
-        "RISK_SCORE": {"type": "NUMBER(5,2)", "desc": "Risk Assessment Score"},
-        "FRAUD_CHECK": {"type": "VARCHAR2(10)", "desc": "Fraud Check Result"},
-        "AVS_RESULT": {"type": "VARCHAR2(2)", "desc": "Address Verification"},
-        "CVV_RESULT": {"type": "VARCHAR2(2)", "desc": "CVV Verification"},
-        "HOST_RESP_CODE": {"type": "VARCHAR2(4)", "desc": "Host Response Code"},
-        "PROCESS_TIME_MS": {"type": "NUMBER(10)", "desc": "Processing Time (ms)"},
-        "CREATED_DT": {"type": "TIMESTAMP", "desc": "Record Creation Date"},
-    }
-}
-
-# ============================================================================
-# TEMPLATES
+# DATA MODELS
 # ============================================================================
 
 @dataclass
-class ISO8583Template:
+class TransactionTemplate:
+    """Custom transaction template"""
+    id: str
     name: str
     description: str
-    fields: Dict[str, str]
+    category: str  # purchase, withdrawal, refund, reversal, balance, etc.
+    card_network: str  # visa, mastercard, amex, discover, etc.
+    message_type: str  # 0100, 0200, 0400, etc.
+    processing_code: str
+    fields: Dict[str, str] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
     
-    def apply_overrides(self, overrides: Dict) -> Dict:
-        merged = copy.deepcopy(self.fields)
-        merged.update(overrides)
-        return merged
+    def to_dict(self):
+        return asdict(self)
 
-TEMPLATES = {
-    "fwd_visasig_direct_purchase_0100": ISO8583Template(
-        name="fwd_visasig_direct_purchase_0100",
-        description="Visa Signature Direct Purchase",
-        fields={
-            "DMTI": "0100", "DE2": "4144779500060809", "DE3": "000000",
-            "DE4": "000000000700", "DE11": "001212", "DE14": "2512",
-            "DE18": "3535", "DE22": "900", "DE32": "59000000754",
-            "DE35": "4144779500060809D251210112345129",
-            "DE37": "024405001212", "DE41": "TERMID01",
-            "DE42": "Visa / PLUS", "DE43": "QTP Execution CO COUS",
-        }
-    ),
-    "fwd_mastercard_purchase_0100": ISO8583Template(
-        name="fwd_mastercard_purchase_0100",
-        description="MasterCard Purchase",
-        fields={
-            "DMTI": "0100", "DE2": "5500000000000004", "DE3": "000000",
-            "DE4": "000000001000", "DE11": "001213", "DE14": "2512",
-            "DE18": "5411", "DE22": "051", "DE37": "024405001213",
-            "DE41": "TERMID02", "DE42": "MasterCard",
-        }
-    ),
-    "fwd_atm_withdrawal_0100": ISO8583Template(
-        name="fwd_atm_withdrawal_0100",
-        description="ATM Cash Withdrawal",
-        fields={
-            "DMTI": "0100", "DE2": "4111111111111111", "DE3": "010000",
-            "DE4": "000000005000", "DE11": "001214", "DE14": "2512",
-            "DE18": "6011", "DE22": "051", "DE37": "024405001214",
-            "DE41": "ATM00001", "DE42": "BANK ATM",
-        }
-    ),
-}
+@dataclass
+class ResponseCode:
+    """Response code definition"""
+    code: str
+    message: str
+    category: str  # approved, declined, error
+    trigger_field: str = ""  # which field triggers this
+    trigger_value: str = ""  # value that triggers this
+
+@dataclass
+class FieldDefinition:
+    """ISO8583 field definition"""
+    id: str
+    name: str
+    description: str
+    data_type: str  # numeric, alphanumeric, binary
+    length: int
+    format: str = ""  # YYMM, HHMMSS, etc.
+    example: str = ""
+
+@dataclass 
+class SQLTable:
+    """SQL table definition for validation"""
+    name: str
+    description: str
+    columns: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    key_columns: List[str] = field(default_factory=list)
 
 # ============================================================================
-# COMMON SCENARIOS
+# KNOWLEDGE BASE - Expandable
 # ============================================================================
 
-COMMON_SCENARIOS = {
-    "approved_purchase": {
-        "name": "Approved Purchase",
-        "description": "Standard approved purchase transaction",
-        "template": "fwd_visasig_direct_purchase_0100",
-        "overrides": {},
-        "expected_response_code": "00",
-        "expected_pph_status": "COMPLETED",
-        "expected_ppdsva_fraud": "PASS",
-        "tags": ["smoke", "positive"],
-        "icon": "🛒"
-    },
-    "declined_insufficient_funds": {
-        "name": "Declined - Insufficient Funds",
-        "description": "Transaction declined due to insufficient funds",
-        "template": "fwd_visasig_direct_purchase_0100",
-        "overrides": {"DE2": "4111111111111112", "DE4": "999999999999"},
-        "expected_response_code": "51",
-        "expected_pph_status": "DECLINED",
-        "expected_ppdsva_fraud": "PASS",
-        "tags": ["negative", "decline"],
-        "icon": "💳"
-    },
-    "declined_expired_card": {
-        "name": "Declined - Expired Card",
-        "description": "Transaction declined due to expired card",
-        "template": "fwd_visasig_direct_purchase_0100",
-        "overrides": {"DE14": "2001"},
-        "expected_response_code": "54",
-        "expected_pph_status": "DECLINED",
-        "expected_ppdsva_fraud": "PASS",
-        "tags": ["negative", "expired"],
-        "icon": "📅"
-    },
-    "high_value_purchase": {
-        "name": "High Value Purchase",
-        "description": "High value purchase within limits",
-        "template": "fwd_visasig_direct_purchase_0100",
-        "overrides": {"DE4": "000000500000"},
-        "expected_response_code": "00",
-        "expected_pph_status": "COMPLETED",
-        "expected_ppdsva_fraud": "PASS",
-        "tags": ["regression", "high-value"],
-        "icon": "💰"
-    },
-    "atm_withdrawal": {
-        "name": "ATM Cash Withdrawal",
-        "description": "ATM cash withdrawal transaction",
-        "template": "fwd_atm_withdrawal_0100",
-        "overrides": {},
-        "expected_response_code": "00",
-        "expected_pph_status": "COMPLETED",
-        "expected_ppdsva_fraud": "PASS",
-        "tags": ["atm", "cash"],
-        "icon": "🏧"
-    },
-}
-
-# ============================================================================
-# HELPERS
-# ============================================================================
-
-def generate_stan(): return str(random.randint(0, 999999)).zfill(6)
-def generate_rrn(): return str(random.randint(0, 999999999999)).zfill(12)
-def generate_auth_id(): return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-def generate_uuid(): return ''.join(random.choices(string.hexdigits.lower(), k=32))
-def format_amount(amt): return str(int(amt * 100)).zfill(12)
-def parse_amount(s): return int(s) / 100 if s.isdigit() else 0
-def mask_pan(pan): return pan[:6] + "******" + pan[-4:] if len(pan) >= 12 else pan
-
-# ============================================================================
-# DATABASE CLIENT
-# ============================================================================
-
-class DatabaseClient:
-    def __init__(self, host="", port=1521, service="", user="", pwd="", use_mock=True):
-        self.use_mock = use_mock
+class KnowledgeBase:
+    """Centralized knowledge base that can be extended"""
     
-    def query_pph_tran(self, rrn: str, stan: str) -> Dict:
-        if self.use_mock:
-            return self._mock_pph_tran(rrn, stan)
-        return {"success": False, "error": "Real DB not configured"}
-    
-    def query_ppdsva(self, rrn: str, stan: str) -> Dict:
-        if self.use_mock:
-            return self._mock_ppdsva(rrn, stan)
-        return {"success": False, "error": "Real DB not configured"}
-    
-    def _mock_pph_tran(self, rrn: str, stan: str) -> Dict:
-        return {
-            "success": True,
-            "record": {
-                "TRAN_ID": generate_uuid(),
-                "MSG_TYPE": "0100",
-                "PAN": "414477******0809",
-                "PROC_CODE": "000000",
-                "TXN_AMT": 7.00,
-                "STAN": stan,
-                "RRN": rrn,
-                "AUTH_CODE": generate_auth_id(),
-                "RESP_CODE": "00",
-                "TERM_ID": "TERMID01",
-                "MERCHANT_ID": "Visa / PLUS",
-                "MCC": "3535",
-                "TXN_STATUS": "COMPLETED",
-                "CREATED_DT": datetime.now().isoformat(),
-                "CARD_TYPE": "VISA",
-            }
-        }
-    
-    def _mock_ppdsva(self, rrn: str, stan: str) -> Dict:
-        return {
-            "success": True,
-            "record": {
-                "SVA_ID": generate_uuid(),
-                "TRAN_ID": generate_uuid(),
-                "RRN": rrn,
-                "STAN": stan,
-                "AUTH_CODE": generate_auth_id(),
-                "NETWORK_ID": "VISA",
-                "NETWORK_RESP": "Approved",
-                "RISK_SCORE": 15.5,
-                "FRAUD_CHECK": "PASS",
-                "AVS_RESULT": "Y",
-                "CVV_RESULT": "M",
-                "HOST_RESP_CODE": "00",
-                "PROCESS_TIME_MS": 245,
-                "CREATED_DT": datetime.now().isoformat(),
-            }
-        }
-
-# ============================================================================
-# COSMOS CLIENT
-# ============================================================================
-
-class COSMOSClient:
-    def __init__(self, url: str, use_mock: bool = True):
-        self.url = url.rstrip('/')
-        self.use_mock = use_mock
-    
-    def send_transaction(self, template_name: str, overrides: Dict) -> Dict:
-        if self.use_mock:
-            return self._mock_transaction(template_name, overrides)
+    def __init__(self):
+        self.templates: Dict[str, TransactionTemplate] = {}
+        self.response_codes: Dict[str, ResponseCode] = {}
+        self.field_definitions: Dict[str, FieldDefinition] = {}
+        self.sql_tables: Dict[str, SQLTable] = {}
+        self.learned_patterns: Dict[str, Any] = {}
+        self.custom_scenarios: List[Dict] = []
         
-        if not HAS_REQUESTS:
-            return {"success": False, "error": "requests library not available"}
-        
-        try:
-            template = TEMPLATES.get(template_name)
-            if not template:
-                return {"success": False, "error": "Template not found"}
-            
-            merged = template.apply_overrides(overrides)
-            payload = {"templateId": template_name, "overrides": overrides, "message": merged}
-            
-            response = requests.post(
-                f"{self.url}/template?id={template_name}&type=MessageTemplate",
-                json=payload, timeout=30, headers={"Content-Type": "application/json"}
-            )
-            
-            return {
-                "success": response.status_code == 200,
-                "status_code": response.status_code,
-                "request": {"template": template_name, "overrides": overrides, "merged": merged},
-                "response": response.json() if response.status_code == 200 else {"error": response.text},
-                "timestamp": datetime.now().isoformat()
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        # Load defaults
+        self._load_default_templates()
+        self._load_default_response_codes()
+        self._load_default_fields()
+        self._load_default_sql_tables()
     
-    def _mock_transaction(self, template_name: str, overrides: Dict) -> Dict:
-        template = TEMPLATES.get(template_name)
-        if not template:
-            return {"success": False, "error": "Template not found"}
+    def _load_default_templates(self):
+        """Load default transaction templates"""
+        defaults = [
+            TransactionTemplate(
+                id="visa_purchase_0100",
+                name="fwd_visasig_direct_purchase_0100",
+                description="Visa Signature Direct Purchase",
+                category="purchase",
+                card_network="visa",
+                message_type="0100",
+                processing_code="000000",
+                fields={
+                    "DMTI": "0100", "DE2": "4144779500060809", "DE3": "000000",
+                    "DE4": "000000000700", "DE11": "{stan}", "DE14": "2512",
+                    "DE18": "3535", "DE22": "900", "DE32": "59000000754",
+                    "DE35": "4144779500060809D251210112345129",
+                    "DE37": "{rrn}", "DE41": "TERMID01", "DE42": "MERCHANT01",
+                    "DE43": "Test Merchant Location"
+                },
+                tags=["visa", "purchase", "signature", "pos"]
+            ),
+            TransactionTemplate(
+                id="mastercard_purchase_0100",
+                name="fwd_mastercard_purchase_0100",
+                description="MasterCard Purchase Authorization",
+                category="purchase",
+                card_network="mastercard",
+                message_type="0100",
+                processing_code="000000",
+                fields={
+                    "DMTI": "0100", "DE2": "5500000000000004", "DE3": "000000",
+                    "DE4": "000000001000", "DE11": "{stan}", "DE14": "2512",
+                    "DE18": "5411", "DE22": "051", "DE37": "{rrn}",
+                    "DE41": "TERMID02", "DE42": "MC_MERCHANT"
+                },
+                tags=["mastercard", "purchase", "pos"]
+            ),
+            TransactionTemplate(
+                id="visa_atm_withdrawal_0100",
+                name="fwd_visa_atm_withdrawal_0100",
+                description="Visa ATM Cash Withdrawal",
+                category="withdrawal",
+                card_network="visa",
+                message_type="0100",
+                processing_code="010000",
+                fields={
+                    "DMTI": "0100", "DE2": "4111111111111111", "DE3": "010000",
+                    "DE4": "000000005000", "DE11": "{stan}", "DE14": "2512",
+                    "DE18": "6011", "DE22": "051", "DE37": "{rrn}",
+                    "DE41": "ATM00001", "DE42": "BANK_ATM_01"
+                },
+                tags=["visa", "atm", "withdrawal", "cash"]
+            ),
+            TransactionTemplate(
+                id="visa_refund_0100",
+                name="fwd_visa_refund_0100",
+                description="Visa Refund/Credit",
+                category="refund",
+                card_network="visa",
+                message_type="0100",
+                processing_code="200000",
+                fields={
+                    "DMTI": "0100", "DE2": "4144779500060809", "DE3": "200000",
+                    "DE4": "000000000500", "DE11": "{stan}", "DE14": "2512",
+                    "DE37": "{rrn}", "DE41": "TERMID01", "DE42": "MERCHANT01"
+                },
+                tags=["visa", "refund", "credit"]
+            ),
+            TransactionTemplate(
+                id="visa_reversal_0400",
+                name="fwd_visa_reversal_0400",
+                description="Visa Reversal",
+                category="reversal",
+                card_network="visa",
+                message_type="0400",
+                processing_code="000000",
+                fields={
+                    "DMTI": "0400", "DE2": "4144779500060809", "DE3": "000000",
+                    "DE4": "000000000700", "DE11": "{stan}", "DE14": "2512",
+                    "DE37": "{rrn}", "DE41": "TERMID01", "DE90": "{original_data}"
+                },
+                tags=["visa", "reversal", "void"]
+            ),
+            TransactionTemplate(
+                id="visa_balance_inquiry_0100",
+                name="fwd_visa_balance_inquiry_0100",
+                description="Visa Balance Inquiry",
+                category="balance",
+                card_network="visa",
+                message_type="0100",
+                processing_code="310000",
+                fields={
+                    "DMTI": "0100", "DE2": "4144779500060809", "DE3": "310000",
+                    "DE4": "000000000000", "DE11": "{stan}", "DE14": "2512",
+                    "DE37": "{rrn}", "DE41": "ATM00001"
+                },
+                tags=["visa", "balance", "inquiry", "atm"]
+            ),
+            TransactionTemplate(
+                id="mastercard_cashback_0100",
+                name="fwd_mastercard_cashback_0100",
+                description="MasterCard Purchase with Cashback",
+                category="cashback",
+                card_network="mastercard",
+                message_type="0100",
+                processing_code="090000",
+                fields={
+                    "DMTI": "0100", "DE2": "5500000000000004", "DE3": "090000",
+                    "DE4": "000000015000", "DE11": "{stan}", "DE14": "2512",
+                    "DE18": "5411", "DE37": "{rrn}", "DE41": "TERMID02",
+                    "DE54": "000000005000"  # Cashback amount
+                },
+                tags=["mastercard", "cashback", "purchase"]
+            ),
+        ]
         
-        merged = template.apply_overrides(overrides)
-        stan = overrides.get("DE11", generate_stan())
-        rrn = overrides.get("DE37", generate_rrn())
+        for template in defaults:
+            self.templates[template.id] = template
+    
+    def _load_default_response_codes(self):
+        """Load default response codes"""
+        defaults = [
+            ResponseCode("00", "Approved", "approved"),
+            ResponseCode("01", "Refer to Issuer", "declined"),
+            ResponseCode("05", "Do Not Honor", "declined", "DE2", "4111111111111114"),
+            ResponseCode("14", "Invalid Card Number", "declined", "DE2", "1234567890123456"),
+            ResponseCode("51", "Insufficient Funds", "declined", "DE4", "999999999999"),
+            ResponseCode("54", "Expired Card", "declined", "DE14", "2001"),
+            ResponseCode("55", "Invalid PIN", "declined", "DE52", ""),
+            ResponseCode("61", "Exceeds Withdrawal Limit", "declined", "DE4", "500000000000"),
+            ResponseCode("62", "Restricted Card", "declined", "DE2", "4111111111111113"),
+            ResponseCode("65", "Activity Limit Exceeded", "declined"),
+            ResponseCode("75", "PIN Tries Exceeded", "declined"),
+            ResponseCode("91", "Issuer Unavailable", "error"),
+            ResponseCode("96", "System Malfunction", "error"),
+        ]
         
-        pan = merged.get("DE2", "")
-        expiry = merged.get("DE14", "2512")
-        amount = merged.get("DE4", "0")
+        for rc in defaults:
+            self.response_codes[rc.code] = rc
+    
+    def _load_default_fields(self):
+        """Load default field definitions"""
+        defaults = [
+            FieldDefinition("DMTI", "Message Type Indicator", "Message type", "numeric", 4, "", "0100"),
+            FieldDefinition("DE2", "Primary Account Number", "Card number", "numeric", 19, "", "4144779500060809"),
+            FieldDefinition("DE3", "Processing Code", "Transaction type code", "numeric", 6, "TTAABB", "000000"),
+            FieldDefinition("DE4", "Transaction Amount", "Amount in cents", "numeric", 12, "", "000000000700"),
+            FieldDefinition("DE7", "Transmission Date/Time", "Date and time", "numeric", 10, "MMDDhhmmss", ""),
+            FieldDefinition("DE11", "System Trace Audit Number", "Unique trace number", "numeric", 6, "", "001234"),
+            FieldDefinition("DE12", "Local Transaction Time", "Time of transaction", "numeric", 6, "hhmmss", ""),
+            FieldDefinition("DE13", "Local Transaction Date", "Date of transaction", "numeric", 4, "MMDD", ""),
+            FieldDefinition("DE14", "Expiration Date", "Card expiry", "numeric", 4, "YYMM", "2512"),
+            FieldDefinition("DE18", "Merchant Category Code", "MCC", "numeric", 4, "", "5411"),
+            FieldDefinition("DE22", "Point of Service Entry Mode", "How card was read", "numeric", 3, "", "051"),
+            FieldDefinition("DE32", "Acquiring Institution ID", "Acquirer ID", "numeric", 11, "", ""),
+            FieldDefinition("DE35", "Track 2 Data", "Magnetic stripe data", "alphanumeric", 37, "", ""),
+            FieldDefinition("DE37", "Retrieval Reference Number", "RRN", "alphanumeric", 12, "", "024405001234"),
+            FieldDefinition("DE38", "Authorization ID", "Approval code", "alphanumeric", 6, "", "ABC123"),
+            FieldDefinition("DE39", "Response Code", "Transaction result", "numeric", 2, "", "00"),
+            FieldDefinition("DE41", "Terminal ID", "Card acceptor terminal", "alphanumeric", 8, "", "TERMID01"),
+            FieldDefinition("DE42", "Merchant ID", "Card acceptor ID", "alphanumeric", 15, "", "MERCHANT01"),
+            FieldDefinition("DE43", "Merchant Name/Location", "Merchant details", "alphanumeric", 40, "", ""),
+            FieldDefinition("DE49", "Currency Code", "Transaction currency", "numeric", 3, "", "840"),
+            FieldDefinition("DE52", "PIN Data", "Encrypted PIN", "binary", 8, "", ""),
+            FieldDefinition("DE54", "Additional Amounts", "Cashback, etc.", "alphanumeric", 120, "", ""),
+            FieldDefinition("DE55", "ICC Data", "EMV chip data", "binary", 999, "", ""),
+        ]
         
-        resp_code = "00"
-        if "1112" in pan: resp_code = "51"
-        elif "1113" in pan: resp_code = "62"
-        elif int(expiry[:2]) < 24: resp_code = "54"
-        elif int(amount) > 500000000000: resp_code = "61"
-        
-        return {
-            "success": True,
-            "status_code": 200,
-            "request": {"template": template_name, "overrides": overrides, "merged": merged},
-            "response": {
-                "mti": "0110",
-                "DE11": stan,
-                "DE37": rrn,
-                "DE38": generate_auth_id() if resp_code == "00" else None,
-                "DE39": resp_code,
-                "responseMessage": RESPONSE_CODES.get(resp_code, {}).get("message", "Unknown")
+        for field_def in defaults:
+            self.field_definitions[field_def.id] = field_def
+    
+    def _load_default_sql_tables(self):
+        """Load default SQL table definitions"""
+        self.sql_tables["PPH_TRAN"] = SQLTable(
+            name="PPH_TRAN",
+            description="Primary Payment Hub Transaction Table",
+            columns={
+                "TRAN_ID": {"type": "VARCHAR2(36)", "desc": "Transaction UUID"},
+                "MSG_TYPE": {"type": "VARCHAR2(4)", "desc": "Message Type"},
+                "PAN": {"type": "VARCHAR2(19)", "desc": "Masked PAN"},
+                "PROC_CODE": {"type": "VARCHAR2(6)", "desc": "Processing Code"},
+                "TXN_AMT": {"type": "NUMBER(15,2)", "desc": "Amount"},
+                "STAN": {"type": "VARCHAR2(6)", "desc": "STAN"},
+                "RRN": {"type": "VARCHAR2(12)", "desc": "RRN"},
+                "AUTH_CODE": {"type": "VARCHAR2(6)", "desc": "Auth Code"},
+                "RESP_CODE": {"type": "VARCHAR2(2)", "desc": "Response Code"},
+                "TERM_ID": {"type": "VARCHAR2(8)", "desc": "Terminal ID"},
+                "MERCHANT_ID": {"type": "VARCHAR2(15)", "desc": "Merchant ID"},
+                "TXN_STATUS": {"type": "VARCHAR2(20)", "desc": "Status"},
+                "CREATED_DT": {"type": "TIMESTAMP", "desc": "Created Date"},
             },
-            "timestamp": datetime.now().isoformat()
+            key_columns=["RRN", "STAN"]
+        )
+        
+        self.sql_tables["PPDSVA"] = SQLTable(
+            name="PPDSVA",
+            description="Payment Processing Data Store - Value Added",
+            columns={
+                "SVA_ID": {"type": "VARCHAR2(36)", "desc": "SVA Record ID"},
+                "TRAN_ID": {"type": "VARCHAR2(36)", "desc": "Transaction ID"},
+                "RRN": {"type": "VARCHAR2(12)", "desc": "RRN"},
+                "STAN": {"type": "VARCHAR2(6)", "desc": "STAN"},
+                "NETWORK_ID": {"type": "VARCHAR2(10)", "desc": "Network"},
+                "RISK_SCORE": {"type": "NUMBER(5,2)", "desc": "Risk Score"},
+                "FRAUD_CHECK": {"type": "VARCHAR2(10)", "desc": "Fraud Result"},
+                "HOST_RESP_CODE": {"type": "VARCHAR2(4)", "desc": "Host Response"},
+                "PROCESS_TIME_MS": {"type": "NUMBER(10)", "desc": "Process Time"},
+            },
+            key_columns=["RRN", "STAN"]
+        )
+    
+    # ========== ADD METHODS ==========
+    
+    def add_template(self, template: TransactionTemplate):
+        """Add a new transaction template"""
+        self.templates[template.id] = template
+    
+    def add_response_code(self, rc: ResponseCode):
+        """Add a new response code"""
+        self.response_codes[rc.code] = rc
+    
+    def add_field_definition(self, field_def: FieldDefinition):
+        """Add a new field definition"""
+        self.field_definitions[field_def.id] = field_def
+    
+    def add_sql_table(self, table: SQLTable):
+        """Add a new SQL table definition"""
+        self.sql_tables[table.name] = table
+    
+    def add_custom_scenario(self, scenario: Dict):
+        """Add a custom scenario pattern"""
+        self.custom_scenarios.append(scenario)
+    
+    # ========== EXPORT/IMPORT ==========
+    
+    def export_to_json(self) -> str:
+        """Export knowledge base to JSON"""
+        data = {
+            "templates": {k: v.to_dict() for k, v in self.templates.items()},
+            "response_codes": {k: asdict(v) for k, v in self.response_codes.items()},
+            "custom_scenarios": self.custom_scenarios,
+            "learned_patterns": self.learned_patterns
         }
-
-# ============================================================================
-# VALIDATION ENGINE
-# ============================================================================
-
-class ValidationEngine:
-    def __init__(self, cosmos: COSMOSClient, db: DatabaseClient):
-        self.cosmos = cosmos
-        self.db = db
+        return json.dumps(data, indent=2)
     
-    def run_full_validation(self, scenario: Dict, cosmos_resp: Dict, pph: Dict, ppdsva: Dict) -> Dict:
-        results = {
-            "timestamp": datetime.now().isoformat(),
-            "scenario": scenario.get("name", "Custom"),
-            "overall_status": "PENDING",
-            "sections": {}
+    def import_from_json(self, json_str: str):
+        """Import knowledge base from JSON"""
+        data = json.loads(json_str)
+        
+        if "templates" in data:
+            for k, v in data["templates"].items():
+                self.templates[k] = TransactionTemplate(**v)
+        
+        if "response_codes" in data:
+            for k, v in data["response_codes"].items():
+                self.response_codes[k] = ResponseCode(**v)
+        
+        if "custom_scenarios" in data:
+            self.custom_scenarios.extend(data["custom_scenarios"])
+
+# ============================================================================
+# FEATURE ANALYZER
+# ============================================================================
+
+class FeatureAnalyzer:
+    """Analyzes Karate feature files to learn patterns"""
+    
+    def __init__(self, kb: KnowledgeBase):
+        self.kb = kb
+        self.analyzed_files: List[Dict] = []
+        self.step_patterns: Dict[str, int] = {}
+        self.scenario_patterns: List[Dict] = []
+    
+    def analyze(self, content: str, filename: str = "unknown") -> Dict:
+        """Analyze a feature file and learn patterns"""
+        analysis = {
+            "filename": filename,
+            "feature_name": "",
+            "tags": [],
+            "backgrounds": [],
+            "scenarios": [],
+            "steps": [],
+            "variables": [],
+            "sql_queries": [],
+            "calls": [],
+            "templates_used": [],
+            "response_codes_used": []
         }
         
-        results["sections"]["cosmos"] = self._validate_cosmos(scenario, cosmos_resp)
-        results["sections"]["pph_tran"] = self._validate_pph_tran(scenario, cosmos_resp, pph)
-        results["sections"]["ppdsva"] = self._validate_ppdsva(scenario, cosmos_resp, ppdsva)
+        lines = content.split('\n')
+        current_section = None
+        current_content = []
+        current_tags = []
         
-        all_checks = []
-        for section in results["sections"].values():
-            all_checks.extend(section.get("checks", []))
+        for line in lines:
+            stripped = line.strip()
+            
+            # Feature name
+            if stripped.startswith('Feature:'):
+                analysis["feature_name"] = stripped.replace('Feature:', '').strip()
+            
+            # Tags
+            if stripped.startswith('@'):
+                tags = re.findall(r'@(\w+[-\w]*)', stripped)
+                current_tags = tags
+                analysis["tags"].extend(tags)
+            
+            # Sections
+            if stripped.startswith('Background:'):
+                current_section = 'background'
+                current_content = []
+                continue
+            
+            if stripped.startswith('Scenario:') or stripped.startswith('Scenario Outline:'):
+                if current_section == 'background' and current_content:
+                    analysis["backgrounds"].append('\n'.join(current_content))
+                
+                current_section = 'scenario'
+                scenario_name = re.sub(r'^Scenario( Outline)?:', '', stripped).strip()
+                current_content = [(stripped, current_tags)]
+                current_tags = []
+                continue
+            
+            if current_section:
+                current_content.append(stripped) if current_section == 'background' else None
+                
+                # Learn step patterns
+                if re.match(r'^\* |^Given |^When |^Then |^And |^But ', stripped):
+                    analysis["steps"].append(stripped)
+                    self._learn_step(stripped)
+                
+                # Variables
+                var_match = re.search(r'\* def (\w+)', stripped)
+                if var_match:
+                    analysis["variables"].append(var_match.group(1))
+                
+                # SQL
+                if 'SELECT' in stripped.upper() or 'query' in stripped.lower():
+                    analysis["sql_queries"].append(stripped)
+                
+                # Calls
+                if 'call read' in stripped:
+                    analysis["calls"].append(stripped)
+                
+                # Templates used
+                template_match = re.search(r"templateName\s*=\s*['\"]([^'\"]+)['\"]", stripped)
+                if template_match:
+                    analysis["templates_used"].append(template_match.group(1))
+                
+                # Response codes
+                rc_match = re.search(r"DE39['\"]?\s*==\s*['\"]?(\d{2})['\"]?", stripped)
+                if rc_match:
+                    analysis["response_codes_used"].append(rc_match.group(1))
         
-        passed = sum(1 for c in all_checks if c["status"] == "PASS")
-        failed = sum(1 for c in all_checks if c["status"] == "FAIL")
-        warned = sum(1 for c in all_checks if c["status"] == "WARN")
+        # Store last scenario
+        if current_section == 'scenario' and current_content:
+            analysis["scenarios"].append({
+                "content": current_content,
+                "tags": current_tags
+            })
         
-        results["summary"] = {"total": len(all_checks), "passed": passed, "failed": failed, "warnings": warned}
-        results["overall_status"] = "FAIL" if failed > 0 else ("WARN" if warned > 0 else "PASS")
+        self.analyzed_files.append(analysis)
+        self._update_knowledge_base(analysis)
         
-        return results
+        return analysis
     
-    def _validate_cosmos(self, scenario: Dict, resp: Dict) -> Dict:
-        checks = []
-        data = resp.get("response", {})
-        expected_rc = scenario.get("expected_response_code", "00")
+    def _learn_step(self, step: str):
+        """Learn from a step pattern"""
+        # Normalize
+        normalized = re.sub(r'[\'"][^"\']+[\'"]', '"{value}"', step)
+        normalized = re.sub(r'\d{4,}', '{number}', normalized)
         
-        actual_mti = data.get("mti") or data.get("DMTI")
-        checks.append({"name": "Response MTI", "expected": "0110", "actual": actual_mti, "status": "PASS" if actual_mti == "0110" else "FAIL"})
-        
-        actual_rc = data.get("DE39") or data.get("responseCode")
-        checks.append({"name": "Response Code (DE39)", "expected": expected_rc, "actual": actual_rc, "status": "PASS" if actual_rc == expected_rc else "FAIL"})
-        
-        if expected_rc == "00":
-            auth_id = data.get("DE38")
-            checks.append({"name": "Auth ID (DE38)", "expected": "Present", "actual": auth_id or "NULL", "status": "PASS" if auth_id else "FAIL"})
-        
-        return {"section_name": "COSMOS Response", "icon": "🌐", "checks": checks}
+        self.step_patterns[normalized] = self.step_patterns.get(normalized, 0) + 1
     
-    def _validate_pph_tran(self, scenario: Dict, cosmos_resp: Dict, pph: Dict) -> Dict:
-        checks = []
-        record = pph.get("record", {})
-        
-        if not pph.get("success"):
-            checks.append({"name": "PPH_TRAN Record", "expected": "Found", "actual": "Not Found", "status": "FAIL"})
-            return {"section_name": "PPH_TRAN Validation", "icon": "🗄️", "checks": checks}
-        
-        checks.append({"name": "PPH_TRAN Record", "expected": "Found", "actual": "Found", "status": "PASS"})
-        
-        expected_status = scenario.get("expected_pph_status", "COMPLETED")
-        actual_status = record.get("TXN_STATUS")
-        checks.append({"name": "Transaction Status", "expected": expected_status, "actual": actual_status, "status": "PASS" if actual_status == expected_status else "FAIL"})
-        
-        cosmos_rc = cosmos_resp.get("response", {}).get("DE39")
-        db_rc = record.get("RESP_CODE")
-        checks.append({"name": "Response Code Match", "expected": cosmos_rc, "actual": db_rc, "status": "PASS" if db_rc == cosmos_rc else "FAIL"})
-        
-        req_rrn = cosmos_resp.get("request", {}).get("overrides", {}).get("DE37")
-        if req_rrn:
-            db_rrn = record.get("RRN")
-            checks.append({"name": "RRN Match", "expected": req_rrn, "actual": db_rrn, "status": "PASS" if db_rrn == req_rrn else "FAIL"})
-        
-        req_stan = cosmos_resp.get("request", {}).get("overrides", {}).get("DE11")
-        if req_stan:
-            db_stan = record.get("STAN")
-            checks.append({"name": "STAN Match", "expected": req_stan, "actual": db_stan, "status": "PASS" if db_stan == req_stan else "FAIL"})
-        
-        return {"section_name": "PPH_TRAN Validation", "icon": "🗄️", "checks": checks}
-    
-    def _validate_ppdsva(self, scenario: Dict, cosmos_resp: Dict, ppdsva: Dict) -> Dict:
-        checks = []
-        record = ppdsva.get("record", {})
-        
-        if not ppdsva.get("success"):
-            checks.append({"name": "PPDSVA Record", "expected": "Found", "actual": "Not Found", "status": "WARN"})
-            return {"section_name": "PPDSVA Validation", "icon": "📊", "checks": checks}
-        
-        checks.append({"name": "PPDSVA Record", "expected": "Found", "actual": "Found", "status": "PASS"})
-        
-        expected_fraud = scenario.get("expected_ppdsva_fraud", "PASS")
-        actual_fraud = record.get("FRAUD_CHECK")
-        checks.append({"name": "Fraud Check", "expected": expected_fraud, "actual": actual_fraud, "status": "PASS" if actual_fraud == expected_fraud else "WARN"})
-        
-        cosmos_rc = cosmos_resp.get("response", {}).get("DE39")
-        host_rc = record.get("HOST_RESP_CODE")
-        checks.append({"name": "Host Response Code", "expected": cosmos_rc, "actual": host_rc, "status": "PASS" if host_rc == cosmos_rc else "WARN"})
-        
-        risk = record.get("RISK_SCORE", 0)
-        checks.append({"name": "Risk Score", "expected": "< 50", "actual": str(risk), "status": "PASS" if float(risk) < 50 else "WARN"})
-        
-        proc_time = record.get("PROCESS_TIME_MS", 0)
-        checks.append({"name": "Processing Time", "expected": "< 3000ms", "actual": f"{proc_time}ms", "status": "PASS" if int(proc_time) < 3000 else "WARN"})
-        
-        return {"section_name": "PPDSVA Validation", "icon": "📊", "checks": checks}
+    def _update_knowledge_base(self, analysis: Dict):
+        """Update knowledge base with learned patterns"""
+        # Add to learned patterns
+        self.kb.learned_patterns.setdefault("steps", {}).update(self.step_patterns)
+        self.kb.learned_patterns.setdefault("templates_used", []).extend(analysis["templates_used"])
+        self.kb.learned_patterns.setdefault("response_codes_used", []).extend(analysis["response_codes_used"])
 
 # ============================================================================
-# KARATE & PYTEST GENERATORS
+# TEST GENERATOR
 # ============================================================================
 
-def generate_karate_with_sql(template_name: str, cosmos_url: str, db_config: Dict) -> str:
-    template = TEMPLATES.get(template_name)
-    return f'''Feature: {template.description} - E2E with SQL Validation
-
-  Background:
-    * url '{cosmos_url}'
-    * def templateName = '{template_name}'
-    * def generateSTAN = function(){{ return Math.floor(Math.random() * 999999).toString().padStart(6, '0') }}
-    * def generateRRN = function(){{ return Math.floor(Math.random() * 999999999999).toString().padStart(12, '0') }}
-
-  @smoke @e2e @sql
-  Scenario: E2E Approved with SQL Validation
-    * def stan = generateSTAN()
-    * def rrn = generateRRN()
+class TestGenerator:
+    """Generates Karate tests from prompts using knowledge base"""
     
-    Given path '/template'
-    And param id = templateName
-    And request {{ templateId: '#(templateName)', overrides: {{ DE11: '#(stan)', DE37: '#(rrn)' }} }}
-    When method post
-    Then status 200
-    And match response.DE39 == '00'
+    def __init__(self, kb: KnowledgeBase):
+        self.kb = kb
     
-    # Validate PPH_TRAN
-    * def pphRecord = db.query("SELECT * FROM PPH_TRAN WHERE RRN='" + rrn + "'")
-    * match pphRecord.TXN_STATUS == 'COMPLETED'
+    def generate(self, prompt: str, options: Dict = None) -> str:
+        """Generate Karate test from prompt"""
+        options = options or {}
+        
+        # Parse intent
+        intent = self._parse_prompt(prompt)
+        
+        # Apply options
+        intent["include_sql"] = options.get("include_sql", True)
+        intent["use_common_calls"] = options.get("use_common_calls", True)
+        intent["include_docs"] = options.get("include_docs", True)
+        
+        # Find best matching template
+        template = self._find_template(intent)
+        
+        # Generate feature
+        return self._generate_feature(intent, template)
     
-    # Validate PPDSVA
-    * def ppdsvaRecord = db.query("SELECT * FROM PPDSVA WHERE RRN='" + rrn + "'")
-    * match ppdsvaRecord.FRAUD_CHECK == 'PASS'
-'''
-
-def generate_pytest_with_sql(template_name: str, cosmos_url: str, db_config: Dict) -> str:
-    return f'''"""ISO8583 E2E Tests with SQL - {template_name}"""
-import pytest, requests, random
-
-class Config:
-    COSMOS_URL = "{cosmos_url}"
-    TEMPLATE = "{template_name}"
-
-def generate_stan(): return str(random.randint(0, 999999)).zfill(6)
-def generate_rrn(): return str(random.randint(0, 999999999999)).zfill(12)
-
-@pytest.fixture
-def api_session():
-    s = requests.Session()
-    s.headers.update({{"Content-Type": "application/json"}})
-    yield s
-    s.close()
-
-class TestE2EWithSQL:
-    @pytest.mark.smoke
-    def test_approved_with_sql(self, api_session):
-        stan, rrn = generate_stan(), generate_rrn()
-        resp = api_session.post(
-            f"{{Config.COSMOS_URL}}/template?id={{Config.TEMPLATE}}",
-            json={{"templateId": Config.TEMPLATE, "overrides": {{"DE11": stan, "DE37": rrn}}}}
-        ).json()
-        assert resp["DE39"] == "00"
-        # Add SQL validation here
-'''
+    def _parse_prompt(self, prompt: str) -> Dict:
+        """Parse prompt to understand intent"""
+        prompt_lower = prompt.lower()
+        
+        intent = {
+            "test_type": "positive",
+            "transaction_type": "purchase",
+            "card_network": "visa",
+            "expected_result": "approved",
+            "decline_reason": None,
+            "amount": None,
+            "custom_fields": {},
+            "tags": [],
+            "scenario_count": 1
+        }
+        
+        # Test type
+        if any(w in prompt_lower for w in ["negative", "decline", "reject", "fail"]):
+            intent["test_type"] = "negative"
+            intent["expected_result"] = "declined"
+        
+        if "e2e" in prompt_lower or "end-to-end" in prompt_lower:
+            intent["test_type"] = "e2e"
+            intent["tags"].append("e2e")
+        
+        if "regression" in prompt_lower:
+            intent["test_type"] = "regression"
+            intent["tags"].append("regression")
+        
+        if "smoke" in prompt_lower:
+            intent["tags"].append("smoke")
+        
+        # Transaction type
+        transaction_keywords = {
+            "withdrawal": ["withdraw", "atm", "cash out"],
+            "refund": ["refund", "credit", "return"],
+            "reversal": ["reversal", "void", "cancel"],
+            "balance": ["balance", "inquiry"],
+            "cashback": ["cashback", "cash back"],
+            "purchase": ["purchase", "buy", "payment", "sale"]
+        }
+        
+        for txn_type, keywords in transaction_keywords.items():
+            if any(kw in prompt_lower for kw in keywords):
+                intent["transaction_type"] = txn_type
+                break
+        
+        # Card network
+        network_keywords = {
+            "mastercard": ["mastercard", "mc", "master card"],
+            "amex": ["amex", "american express"],
+            "discover": ["discover"],
+            "visa": ["visa"]
+        }
+        
+        for network, keywords in network_keywords.items():
+            if any(kw in prompt_lower for kw in keywords):
+                intent["card_network"] = network
+                break
+        
+        # Decline reason
+        for code, rc in self.kb.response_codes.items():
+            if rc.message.lower() in prompt_lower or any(w in prompt_lower for w in rc.message.lower().split()):
+                if rc.category == "declined":
+                    intent["decline_reason"] = rc
+                    intent["expected_result"] = "declined"
+                    break
+        
+        # Amount
+        amount_match = re.search(r'\$?(\d+(?:,\d{3})*(?:\.\d{2})?)', prompt)
+        if amount_match:
+            amount = float(amount_match.group(1).replace(',', ''))
+            intent["amount"] = str(int(amount * 100)).zfill(12)
+        
+        # Multiple scenarios
+        if any(w in prompt_lower for w in ["multiple", "several", "batch", "data-driven"]):
+            intent["scenario_count"] = 3
+        
+        return intent
+    
+    def _find_template(self, intent: Dict) -> TransactionTemplate:
+        """Find best matching template"""
+        scores = {}
+        
+        for tid, template in self.kb.templates.items():
+            score = 0
+            
+            # Match category
+            if template.category == intent["transaction_type"]:
+                score += 10
+            
+            # Match network
+            if template.card_network == intent["card_network"]:
+                score += 5
+            
+            # Match tags
+            for tag in intent["tags"]:
+                if tag in template.tags:
+                    score += 2
+            
+            scores[tid] = score
+        
+        if scores:
+            best_id = max(scores, key=scores.get)
+            return self.kb.templates[best_id]
+        
+        # Default
+        return list(self.kb.templates.values())[0]
+    
+    def _generate_feature(self, intent: Dict, template: TransactionTemplate) -> str:
+        """Generate complete feature file"""
+        lines = []
+        
+        # Tags
+        tags = self._build_tags(intent, template)
+        lines.append(tags)
+        
+        # Feature
+        feature_name = self._build_feature_name(intent, template)
+        lines.append(f"Feature: {feature_name}")
+        lines.append("")
+        
+        if intent.get("include_docs"):
+            lines.append(f"  # Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            lines.append(f"  # Template: {template.name}")
+            lines.append(f"  # Category: {template.category}")
+            lines.append(f"  # Network: {template.card_network}")
+            lines.append("")
+        
+        # Background
+        lines.append(self._generate_background(intent, template))
+        
+        # Scenarios
+        if intent["scenario_count"] > 1:
+            lines.append(self._generate_data_driven_scenario(intent, template))
+        else:
+            lines.append(self._generate_scenario(intent, template))
+        
+        return '\n'.join(lines)
+    
+    def _build_tags(self, intent: Dict, template: TransactionTemplate) -> str:
+        """Build tags line"""
+        tags = set(intent["tags"])
+        tags.add(template.card_network)
+        tags.add(template.category)
+        
+        if intent["expected_result"] == "approved":
+            tags.add("positive")
+        else:
+            tags.add("negative")
+        
+        if intent.get("include_sql"):
+            tags.add("sql")
+        
+        return "@" + " @".join(sorted(tags))
+    
+    def _build_feature_name(self, intent: Dict, template: TransactionTemplate) -> str:
+        """Build feature name"""
+        parts = [template.card_network.title(), template.category.title()]
+        
+        if intent["expected_result"] == "declined" and intent["decline_reason"]:
+            parts.append(f"- {intent['decline_reason'].message}")
+        elif intent["expected_result"] == "approved":
+            parts.append("- Approved")
+        
+        if intent.get("include_sql"):
+            parts.append("with SQL Validation")
+        
+        return " ".join(parts)
+    
+    def _generate_background(self, intent: Dict, template: TransactionTemplate) -> str:
+        """Generate Background section"""
+        lines = ["  Background:"]
+        lines.append("    * url cosmosUrl")
+        lines.append(f"    * def templateName = '{template.name}'")
+        lines.append("")
+        lines.append("    # Dynamic generators")
+        lines.append("    * def generateSTAN = function(){ return Math.floor(Math.random() * 999999).toString().padStart(6, '0') }")
+        lines.append("    * def generateRRN = function(){ return Math.floor(Math.random() * 999999999999).toString().padStart(12, '0') }")
+        lines.append("")
+        
+        if intent.get("include_sql"):
+            for table_name, table in self.kb.sql_tables.items():
+                key_cols = " AND ".join([f"{c}='\" + {c.lower()} + \"'" for c in table.key_columns])
+                lines.append(f"    # Query {table_name}")
+                lines.append(f"    * def query{table_name.replace('_', '')} = ")
+                lines.append("    \"\"\"")
+                lines.append(f"    function({', '.join([c.lower() for c in table.key_columns])}) {{")
+                lines.append(f"      var DbUtils = Java.type('com.intuit.karate.demo.util.DbUtils');")
+                lines.append(f"      return DbUtils.query(\"SELECT * FROM {table_name} WHERE {key_cols}\");")
+                lines.append("    }")
+                lines.append("    \"\"\"")
+                lines.append("")
+        
+        lines.append("    * configure headers = { 'Content-Type': 'application/json' }")
+        lines.append("")
+        
+        return '\n'.join(lines)
+    
+    def _generate_scenario(self, intent: Dict, template: TransactionTemplate) -> str:
+        """Generate single scenario"""
+        lines = []
+        
+        # Determine expected values
+        if intent["expected_result"] == "approved":
+            exp_rc = "00"
+            exp_status = "COMPLETED"
+            overrides = {}
+        else:
+            rc = intent["decline_reason"]
+            exp_rc = rc.code if rc else "05"
+            exp_status = "DECLINED"
+            overrides = {}
+            if rc and rc.trigger_field and rc.trigger_value:
+                overrides[rc.trigger_field] = rc.trigger_value
+        
+        if intent.get("amount"):
+            overrides["DE4"] = intent["amount"]
+        
+        # Scenario tags
+        scenario_tags = ["@" + intent["test_type"]]
+        if intent.get("include_sql"):
+            scenario_tags.append("@sql")
+        
+        lines.append("  " + " ".join(scenario_tags))
+        
+        # Scenario name
+        if exp_rc == "00":
+            name = f"{template.category.title()} - Approved"
+        else:
+            reason = intent["decline_reason"].message if intent["decline_reason"] else "Declined"
+            name = f"{template.category.title()} - {reason}"
+        
+        lines.append(f"  Scenario: {name}")
+        lines.append("")
+        
+        # Generate values
+        lines.append("    # Generate unique identifiers")
+        lines.append("    * def stan = generateSTAN()")
+        lines.append("    * def rrn = generateRRN()")
+        lines.append("")
+        
+        # Overrides
+        override_parts = ["DE11: '#(stan)'", "DE37: '#(rrn)'"]
+        for field, value in overrides.items():
+            override_parts.append(f"{field}: '{value}'")
+        
+        lines.append(f"    * def overrides = {{ {', '.join(override_parts)} }}")
+        lines.append("")
+        
+        # Send request
+        if intent.get("use_common_calls"):
+            lines.append("    # Send using common scenario")
+            lines.append(f"    * def result = call read('common_scenarios.feature@common_send_0100') {{ templateName: '#(templateName)', overrides: '#(overrides)' }}")
+            lines.append("    * def response = result.cosmosResponse")
+        else:
+            lines.append("    # Send request")
+            lines.append("    Given path '/template'")
+            lines.append("    And param id = templateName")
+            lines.append("    And param type = 'MessageTemplate'")
+            lines.append("    And request { templateId: '#(templateName)', overrides: '#(overrides)' }")
+            lines.append("    When method post")
+            lines.append("    Then status 200")
+            lines.append("    * def response = response")
+        
+        lines.append("")
+        
+        # Validate response
+        lines.append("    # Validate COSMOS response")
+        lines.append(f"    * match response.DE39 == '{exp_rc}'")
+        if exp_rc == "00":
+            lines.append("    * match response.DE38 == '#notnull'")
+        lines.append("")
+        
+        # SQL validation
+        if intent.get("include_sql"):
+            for table_name, table in self.kb.sql_tables.items():
+                func_name = f"query{table_name.replace('_', '')}"
+                lines.append(f"    # Validate {table_name}")
+                lines.append(f"    * def {table_name.lower()} = {func_name}(rrn, stan)")
+                lines.append(f"    * match {table_name.lower()} != null")
+                
+                if table_name == "PPH_TRAN":
+                    lines.append(f"    * match {table_name.lower()}.TXN_STATUS == '{exp_status}'")
+                    lines.append(f"    * match {table_name.lower()}.RESP_CODE == '{exp_rc}'")
+                elif table_name == "PPDSVA":
+                    lines.append(f"    * match {table_name.lower()}.HOST_RESP_CODE == '{exp_rc}'")
+                    lines.append(f"    * match {table_name.lower()}.FRAUD_CHECK == 'PASS'")
+                
+                lines.append("")
+        
+        return '\n'.join(lines)
+    
+    def _generate_data_driven_scenario(self, intent: Dict, template: TransactionTemplate) -> str:
+        """Generate data-driven scenario outline"""
+        lines = []
+        
+        lines.append("  @regression @data-driven")
+        lines.append(f"  Scenario Outline: {template.category.title()} - <description>")
+        lines.append("")
+        lines.append("    * def stan = generateSTAN()")
+        lines.append("    * def rrn = generateRRN()")
+        lines.append("    * def overrides = { DE11: '#(stan)', DE37: '#(rrn)', DE2: '<pan>', DE4: '<amount>' }")
+        lines.append("")
+        lines.append("    Given path '/template'")
+        lines.append("    And param id = templateName")
+        lines.append("    And request { templateId: '#(templateName)', overrides: '#(overrides)' }")
+        lines.append("    When method post")
+        lines.append("    Then status 200")
+        lines.append("    And match response.DE39 == '<expectedRC>'")
+        lines.append("")
+        
+        if intent.get("include_sql"):
+            lines.append("    * def pph = queryPPHTRAN(rrn, stan)")
+            lines.append("    * match pph.TXN_STATUS == '<expectedStatus>'")
+            lines.append("")
+        
+        lines.append("    Examples:")
+        lines.append("      | description         | pan                | amount       | expectedRC | expectedStatus |")
+        lines.append("      | Approved Low        | 4144779500060809   | 000000000100 | 00         | COMPLETED      |")
+        lines.append("      | Approved Medium     | 4144779500060809   | 000000010000 | 00         | COMPLETED      |")
+        lines.append("      | Insufficient Funds  | 4111111111111112   | 999999999999 | 51         | DECLINED       |")
+        lines.append("      | Expired Card        | 4144779500060809   | 000000000100 | 54         | DECLINED       |")
+        lines.append("")
+        
+        return '\n'.join(lines)
 
 # ============================================================================
-# STREAMLIT UI - MODERN PROFESSIONAL THEME
+# STREAMLIT UI
 # ============================================================================
 
-st.set_page_config(
-    page_title="ISO8583 COSMOS Studio",
-    page_icon="💳",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="AI Karate Generator Pro", page_icon="🥋", layout="wide")
 
-# Modern Professional CSS
+# CSS
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap');
 
-:root {
-    --primary: #6366F1;
-    --primary-light: #818CF8;
-    --primary-dark: #4F46E5;
-    --success: #10B981;
-    --success-light: #D1FAE5;
-    --warning: #F59E0B;
-    --warning-light: #FEF3C7;
-    --danger: #EF4444;
-    --danger-light: #FEE2E2;
-    --gray-50: #F9FAFB;
-    --gray-100: #F3F4F6;
-    --gray-200: #E5E7EB;
-    --gray-300: #D1D5DB;
-    --gray-400: #9CA3AF;
-    --gray-500: #6B7280;
-    --gray-600: #4B5563;
-    --gray-700: #374151;
-    --gray-800: #1F2937;
-    --gray-900: #111827;
-    --white: #FFFFFF;
-    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-    --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
-    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-}
+.stApp { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); }
 
-/* Global Styles */
-.stApp {
-    background: linear-gradient(135deg, #F8FAFC 0%, #EEF2FF 50%, #F8FAFC 100%);
-    font-family: 'Inter', sans-serif;
-}
-
-/* Hide Streamlit Branding */
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
-
-/* Main Header */
-.main-header {
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+.header-card {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     border-radius: 16px;
-    padding: 2rem 2.5rem;
+    padding: 2rem;
     margin-bottom: 2rem;
-    box-shadow: var(--shadow-lg);
-    position: relative;
-    overflow: hidden;
+    color: white;
+    text-align: center;
 }
 
-.main-header::before {
-    content: '';
-    position: absolute;
-    top: -50%;
-    right: -10%;
-    width: 300px;
-    height: 300px;
-    background: rgba(255,255,255,0.1);
-    border-radius: 50%;
-}
+.header-card h1 { font-size: 2.5rem; font-weight: 700; margin: 0; }
+.header-card p { opacity: 0.9; margin-top: 0.5rem; }
 
-.main-header::after {
-    content: '';
-    position: absolute;
-    bottom: -30%;
-    left: 10%;
-    width: 200px;
-    height: 200px;
+.section-card {
     background: rgba(255,255,255,0.05);
-    border-radius: 50%;
-}
-
-.main-title {
-    font-family: 'Inter', sans-serif;
-    font-size: 2rem;
-    font-weight: 700;
-    color: var(--white);
-    margin: 0;
-    position: relative;
-    z-index: 1;
-}
-
-.main-subtitle {
-    font-size: 1rem;
-    color: rgba(255,255,255,0.8);
-    margin-top: 0.5rem;
-    font-weight: 400;
-    position: relative;
-    z-index: 1;
-}
-
-/* Section Headers */
-.section-header {
-    font-family: 'Inter', sans-serif;
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--gray-800);
-    margin: 1.5rem 0 1rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.section-header-icon {
-    font-size: 1.5rem;
-}
-
-/* Cards */
-.card {
-    background: var(--white);
-    border: 1px solid var(--gray-200);
+    border: 1px solid rgba(255,255,255,0.1);
     border-radius: 12px;
     padding: 1.5rem;
     margin: 1rem 0;
-    box-shadow: var(--shadow);
-    transition: all 0.2s ease;
 }
 
-.card:hover {
-    box-shadow: var(--shadow-md);
-    border-color: var(--gray-300);
+.stat-pill {
+    display: inline-block;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+    padding: 0.4rem 1rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    margin: 0.25rem;
 }
 
-.card-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 1rem;
-}
-
-.card-icon {
-    width: 40px;
-    height: 40px;
-    background: linear-gradient(135deg, var(--primary-light), var(--primary));
+.template-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.1);
     border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.25rem;
+    padding: 1rem;
+    margin: 0.5rem 0;
 }
 
-.card-title {
-    font-weight: 600;
-    color: var(--gray-800);
-    font-size: 1rem;
+.template-card:hover {
+    border-color: #667eea;
+    background: rgba(102, 126, 234, 0.1);
 }
 
-.card-subtitle {
-    font-size: 0.875rem;
-    color: var(--gray-500);
-}
-
-/* Status Badges */
-.badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.375rem;
-    padding: 0.25rem 0.75rem;
-    border-radius: 9999px;
-    font-size: 0.75rem;
-    font-weight: 500;
+.code-output {
+    background: #1e1e1e;
+    border-radius: 10px;
+    padding: 1rem;
     font-family: 'JetBrains Mono', monospace;
-}
-
-.badge-success {
-    background: var(--success-light);
-    color: #065F46;
-    border: 1px solid #A7F3D0;
-}
-
-.badge-danger {
-    background: var(--danger-light);
-    color: #991B1B;
-    border: 1px solid #FECACA;
-}
-
-.badge-warning {
-    background: var(--warning-light);
-    color: #92400E;
-    border: 1px solid #FDE68A;
-}
-
-.badge-info {
-    background: #DBEAFE;
-    color: #1E40AF;
-    border: 1px solid #BFDBFE;
-}
-
-/* Metrics Grid */
-.metrics-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 1rem;
-    margin: 1.5rem 0;
-}
-
-.metric-card {
-    background: var(--white);
-    border: 1px solid var(--gray-200);
-    border-radius: 12px;
-    padding: 1.25rem;
-    text-align: center;
-    box-shadow: var(--shadow-sm);
-}
-
-.metric-value {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 2rem;
-    font-weight: 700;
-    line-height: 1;
-}
-
-.metric-value.success { color: var(--success); }
-.metric-value.danger { color: var(--danger); }
-.metric-value.warning { color: var(--warning); }
-.metric-value.primary { color: var(--primary); }
-
-.metric-label {
-    font-size: 0.75rem;
-    color: var(--gray-500);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-top: 0.5rem;
-    font-weight: 500;
-}
-
-/* Validation Section */
-.validation-section {
-    background: var(--gray-50);
-    border: 1px solid var(--gray-200);
-    border-radius: 10px;
-    margin: 1rem 0;
-    overflow: hidden;
-}
-
-.validation-section-header {
-    background: var(--white);
-    padding: 0.875rem 1.25rem;
-    border-bottom: 1px solid var(--gray-200);
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 600;
-    color: var(--gray-700);
-}
-
-.validation-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.75rem 1.25rem;
-    border-bottom: 1px solid var(--gray-100);
-    background: var(--white);
-}
-
-.validation-row:last-child {
-    border-bottom: none;
-}
-
-.validation-name {
-    font-size: 0.875rem;
-    color: var(--gray-700);
-}
-
-.validation-values {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.8rem;
-}
-
-.validation-expected {
-    color: var(--gray-400);
-}
-
-.validation-actual {
-    color: var(--gray-700);
-    font-weight: 500;
-}
-
-/* Step Indicator */
-.step-indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem 1rem;
-    background: linear-gradient(135deg, #EEF2FF, #E0E7FF);
-    border-radius: 8px;
-    margin: 1rem 0;
-    border-left: 4px solid var(--primary);
-}
-
-.step-number {
-    background: var(--primary);
-    color: var(--white);
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.875rem;
-    font-weight: 600;
-}
-
-.step-text {
-    font-weight: 500;
-    color: var(--gray-700);
-}
-
-/* Scenario Cards */
-.scenario-card {
-    background: var(--white);
-    border: 1px solid var(--gray-200);
-    border-radius: 12px;
-    padding: 1.25rem;
-    margin: 0.75rem 0;
-    transition: all 0.2s ease;
-    cursor: pointer;
-}
-
-.scenario-card:hover {
-    border-color: var(--primary-light);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-}
-
-.scenario-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 0.5rem;
-}
-
-.scenario-icon {
-    font-size: 1.5rem;
-}
-
-.scenario-title {
-    font-weight: 600;
-    color: var(--gray-800);
-}
-
-.scenario-desc {
-    font-size: 0.875rem;
-    color: var(--gray-500);
-    margin-bottom: 0.75rem;
-}
-
-.scenario-tags {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-}
-
-.tag {
-    background: var(--gray-100);
-    color: var(--gray-600);
-    padding: 0.2rem 0.6rem;
-    border-radius: 6px;
-    font-size: 0.7rem;
-    font-weight: 500;
-    font-family: 'JetBrains Mono', monospace;
-}
-
-/* Schema Table */
-.schema-table {
-    background: var(--white);
-    border: 1px solid var(--gray-200);
-    border-radius: 10px;
-    overflow: hidden;
-    margin: 1rem 0;
-}
-
-.schema-header {
-    background: linear-gradient(135deg, var(--gray-100), var(--gray-50));
-    padding: 0.75rem 1rem;
-    font-weight: 600;
-    color: var(--gray-700);
-    border-bottom: 1px solid var(--gray-200);
-}
-
-.schema-row {
-    display: grid;
-    grid-template-columns: 140px 130px 1fr;
-    padding: 0.6rem 1rem;
-    border-bottom: 1px solid var(--gray-100);
-    font-size: 0.8rem;
-    align-items: center;
-}
-
-.schema-row:last-child {
-    border-bottom: none;
-}
-
-.schema-col {
-    font-family: 'JetBrains Mono', monospace;
-    color: var(--primary);
-    font-weight: 500;
-}
-
-.schema-type {
-    font-family: 'JetBrains Mono', monospace;
-    color: var(--warning);
-    font-size: 0.75rem;
-}
-
-.schema-desc {
-    color: var(--gray-500);
-}
-
-/* Streamlit Overrides */
-.stTabs [data-baseweb="tab-list"] {
-    background: var(--white);
-    border-radius: 10px;
-    padding: 4px;
-    gap: 4px;
-    border: 1px solid var(--gray-200);
-}
-
-.stTabs [data-baseweb="tab"] {
-    font-family: 'Inter', sans-serif;
-    font-weight: 500;
-    font-size: 0.875rem;
-    color: var(--gray-600);
-    background: transparent;
-    border-radius: 8px;
-    padding: 0.625rem 1.25rem;
-}
-
-.stTabs [aria-selected="true"] {
-    background: linear-gradient(135deg, var(--primary), var(--primary-dark)) !important;
-    color: var(--white) !important;
-}
-
-.stButton > button {
-    font-family: 'Inter', sans-serif;
-    font-weight: 600;
-    background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-    color: var(--white);
-    border: none;
-    border-radius: 10px;
-    padding: 0.75rem 1.5rem;
-    font-size: 0.875rem;
-    transition: all 0.2s ease;
-    box-shadow: var(--shadow);
-}
-
-.stButton > button:hover {
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
-}
-
-.stTextInput > div > div > input,
-.stSelectbox > div > div,
-.stNumberInput > div > div > input {
-    font-family: 'Inter', sans-serif;
-    border: 1px solid var(--gray-300) !important;
-    border-radius: 8px !important;
-    background: var(--white) !important;
-}
-
-.stTextInput > div > div > input:focus,
-.stSelectbox > div > div:focus {
-    border-color: var(--primary) !important;
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1) !important;
-}
-
-.stExpander {
-    background: var(--white);
-    border: 1px solid var(--gray-200);
-    border-radius: 10px;
-}
-
-/* Success/Error Messages */
-.stSuccess {
-    background: var(--success-light);
-    border: 1px solid #A7F3D0;
-    border-radius: 10px;
-}
-
-.stError {
-    background: var(--danger-light);
-    border: 1px solid #FECACA;
-    border-radius: 10px;
-}
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background: var(--white);
-    border-right: 1px solid var(--gray-200);
-}
-
-section[data-testid="stSidebar"] .stMarkdown h3 {
-    color: var(--gray-800);
-    font-weight: 600;
-    font-size: 0.875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    font-size: 0.85rem;
 }
 </style>
 """, unsafe_allow_html=True)
 
 def main():
+    # Session state
+    if 'kb' not in st.session_state:
+        st.session_state.kb = KnowledgeBase()
+    if 'analyzer' not in st.session_state:
+        st.session_state.analyzer = FeatureAnalyzer(st.session_state.kb)
+    if 'generator' not in st.session_state:
+        st.session_state.generator = TestGenerator(st.session_state.kb)
+    
+    kb = st.session_state.kb
+    analyzer = st.session_state.analyzer
+    generator = st.session_state.generator
+    
     # Header
     st.markdown('''
-    <div class="main-header">
-        <h1 class="main-title">💳 ISO8583 COSMOS Studio</h1>
-        <p class="main-subtitle">Complete E2E Transaction Validation • COSMOS Simulator • PPH_TRAN • PPDSVA • SQL Validation</p>
+    <div class="header-card">
+        <h1>🥋 AI Karate Test Generator Pro</h1>
+        <p>Train • Add Templates • Generate Tests from Natural Language</p>
     </div>
     ''', unsafe_allow_html=True)
     
-    # Sidebar
-    with st.sidebar:
-        st.markdown("### ⚙️ Configuration")
-        use_mock = st.checkbox("🔧 Demo Mode", value=True, help="Use simulated data for testing")
-        
-        st.markdown("---")
-        st.markdown("### 🌐 COSMOS")
-        cosmos_url = st.text_input("API URL", "http://10.160.59.86:8080", disabled=use_mock)
-        
-        st.markdown("---")
-        st.markdown("### 🗄️ Database")
-        db_host = st.text_input("Host", "localhost", disabled=use_mock)
-        db_port = st.number_input("Port", value=1521, disabled=use_mock)
-        db_service = st.text_input("Service", "ORCL", disabled=use_mock)
-        
-        db_config = {"host": db_host, "port": db_port, "service": db_service}
-        
-        st.markdown("---")
-        st.markdown("### 📋 Template")
-        selected_template = st.selectbox(
-            "Select Template",
-            list(TEMPLATES.keys()),
-            format_func=lambda x: TEMPLATES[x].description
-        )
-    
-    # Initialize clients
-    cosmos = COSMOSClient(cosmos_url, use_mock)
-    db = DatabaseClient(db_host, db_port, db_service, use_mock=use_mock)
-    engine = ValidationEngine(cosmos, db)
-    
     # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📤 E2E Validation",
-        "📋 Scenarios",
-        "🗄️ SQL Schema",
-        "📝 Karate",
-        "🐍 Python"
+        "✨ Generate",
+        "📚 Train",
+        "➕ Add Templates",
+        "📋 Knowledge Base",
+        "⬇️ Export/Import"
     ])
     
-    # TAB 1: E2E VALIDATION
+    # ========== TAB 1: GENERATE ==========
     with tab1:
-        st.markdown('<div class="section-header"><span class="section-header-icon">🔄</span> E2E Transaction Validation</div>', unsafe_allow_html=True)
+        st.markdown("### Generate Tests from Natural Language")
         
-        col1, col2 = st.columns([1, 1.2])
+        # Quick examples
+        st.markdown("**Quick Examples** (click to use)")
+        examples = [
+            "Write E2E test for approved Visa purchase with SQL validation",
+            "Generate negative test for insufficient funds decline",
+            "Create ATM withdrawal test for $500",
+            "Write MasterCard refund test",
+            "Generate data-driven regression tests for various amounts"
+        ]
+        
+        col1, col2 = st.columns(2)
+        selected = ""
+        for i, ex in enumerate(examples):
+            with col1 if i % 2 == 0 else col2:
+                if st.button(f"📝 {ex[:45]}...", key=f"ex{i}", use_container_width=True):
+                    selected = ex
+        
+        # Prompt input
+        prompt = st.text_area(
+            "Describe the test you want",
+            value=selected,
+            height=100,
+            placeholder="Example: Write an E2E test for declined Visa purchase due to expired card with SQL validation for PPH_TRAN and PPDSVA"
+        )
+        
+        # Options
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            include_sql = st.checkbox("Include SQL Validation", value=True)
+        with col2:
+            use_common = st.checkbox("Use Common Scenarios", value=True)
+        with col3:
+            include_docs = st.checkbox("Include Documentation", value=True)
+        
+        if st.button("🚀 Generate Test", type="primary", use_container_width=True):
+            if prompt:
+                with st.spinner("Generating..."):
+                    feature = generator.generate(prompt, {
+                        "include_sql": include_sql,
+                        "use_common_calls": use_common,
+                        "include_docs": include_docs
+                    })
+                
+                st.success("✅ Generated!")
+                st.code(feature, language="gherkin")
+                
+                st.download_button(
+                    "📥 Download .feature",
+                    feature,
+                    "generated_test.feature",
+                    use_container_width=True
+                )
+            else:
+                st.warning("Please enter a prompt")
+    
+    # ========== TAB 2: TRAIN ==========
+    with tab2:
+        st.markdown("### Train on Your Feature Files")
+        
+        col1, col2 = st.columns([1, 1])
         
         with col1:
-            template = TEMPLATES[selected_template]
+            uploaded = st.file_uploader("Upload .feature files", type=["feature", "txt"], accept_multiple_files=True)
             
-            st.markdown(f'''
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon">📄</div>
-                    <div>
-                        <div class="card-title">{template.name}</div>
-                        <div class="card-subtitle">{template.description}</div>
-                    </div>
-                </div>
-            </div>
-            ''', unsafe_allow_html=True)
+            pasted = st.text_area("Or paste feature content", height=250, placeholder="Paste your Karate feature file here...")
             
-            with st.expander("📋 View Template Fields"):
-                st.json(template.fields)
-            
-            st.markdown("#### Field Overrides")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                ovr_pan = st.text_input("DE2 - PAN", placeholder="Use template value")
-                ovr_exp = st.text_input("DE14 - Expiry", placeholder="YYMM")
-            with c2:
-                ovr_amt = st.number_input("DE4 - Amount ($)", min_value=0.0, step=0.01)
-                ovr_term = st.text_input("DE41 - Terminal", placeholder="Use template")
-            
-            st.markdown("#### Expected Results")
-            c1, c2 = st.columns(2)
-            with c1:
-                exp_rc = st.selectbox(
-                    "Response Code",
-                    list(RESPONSE_CODES.keys()),
-                    format_func=lambda x: f"{x} - {RESPONSE_CODES[x]['message']}"
-                )
-            with c2:
-                exp_status = st.selectbox("DB Status", ["COMPLETED", "DECLINED", "REJECTED"])
-            
-            # Build overrides
-            overrides = {}
-            if ovr_pan: overrides["DE2"] = ovr_pan
-            if ovr_amt > 0: overrides["DE4"] = format_amount(ovr_amt)
-            if ovr_exp: overrides["DE14"] = ovr_exp
-            if ovr_term: overrides["DE41"] = ovr_term
-            
-            stan, rrn = generate_stan(), generate_rrn()
-            overrides["DE11"] = stan
-            overrides["DE37"] = rrn
-            
-            scenario = {
-                "name": "Custom Test",
-                "template": selected_template,
-                "overrides": overrides,
-                "expected_response_code": exp_rc,
-                "expected_pph_status": exp_status,
-                "expected_ppdsva_fraud": "PASS"
-            }
-            
-            st.markdown(f'''
-            <div class="card" style="background: linear-gradient(135deg, #EEF2FF, #E0E7FF);">
-                <div style="display: flex; gap: 2rem;">
-                    <div>
-                        <div style="font-size: 0.75rem; color: #6B7280; text-transform: uppercase;">STAN</div>
-                        <div style="font-family: 'JetBrains Mono'; font-weight: 600; color: #4F46E5;">{stan}</div>
-                    </div>
-                    <div>
-                        <div style="font-size: 0.75rem; color: #6B7280; text-transform: uppercase;">RRN</div>
-                        <div style="font-family: 'JetBrains Mono'; font-weight: 600; color: #4F46E5;">{rrn}</div>
-                    </div>
-                </div>
-            </div>
-            ''', unsafe_allow_html=True)
-            
-            run = st.button("🚀 Run E2E Validation", use_container_width=True)
+            if st.button("🧠 Train", use_container_width=True):
+                count = 0
+                if uploaded:
+                    for f in uploaded:
+                        content = f.read().decode('utf-8')
+                        analyzer.analyze(content, f.name)
+                        count += 1
+                
+                if pasted.strip():
+                    analyzer.analyze(pasted, "pasted_content")
+                    count += 1
+                
+                if count > 0:
+                    st.success(f"✅ Trained on {count} file(s)!")
+                else:
+                    st.warning("Please upload or paste content")
         
         with col2:
-            if run:
-                # Step 1
-                st.markdown('<div class="step-indicator"><span class="step-number">1</span><span class="step-text">Sending to COSMOS Simulator</span></div>', unsafe_allow_html=True)
-                
-                with st.spinner(""):
-                    cosmos_resp = cosmos.send_transaction(selected_template, overrides)
-                
-                if cosmos_resp.get("success"):
-                    st.success("✅ Transaction sent successfully")
-                else:
-                    st.error(f"❌ Failed: {cosmos_resp.get('error')}")
-                
-                with st.expander("View COSMOS Response"):
-                    st.json(cosmos_resp.get("response", {}))
-                
-                # Step 2
-                st.markdown('<div class="step-indicator"><span class="step-number">2</span><span class="step-text">Querying PPH_TRAN Table</span></div>', unsafe_allow_html=True)
-                
-                pph = db.query_pph_tran(rrn, stan)
-                if pph.get("success"):
-                    st.success("✅ PPH_TRAN record found")
-                else:
-                    st.warning("⚠️ PPH_TRAN record not found")
-                
-                with st.expander("View PPH_TRAN Record"):
-                    st.json(pph.get("record", {}))
-                
-                # Step 3
-                st.markdown('<div class="step-indicator"><span class="step-number">3</span><span class="step-text">Querying PPDSVA Table</span></div>', unsafe_allow_html=True)
-                
-                ppdsva = db.query_ppdsva(rrn, stan)
-                if ppdsva.get("success"):
-                    st.success("✅ PPDSVA record found")
-                else:
-                    st.warning("⚠️ PPDSVA record not found")
-                
-                with st.expander("View PPDSVA Record"):
-                    st.json(ppdsva.get("record", {}))
-                
-                # Step 4
-                st.markdown('<div class="step-indicator"><span class="step-number">4</span><span class="step-text">Running Validations</span></div>', unsafe_allow_html=True)
-                
-                results = engine.run_full_validation(scenario, cosmos_resp, pph, ppdsva)
-                
-                # Metrics
-                s = results.get("summary", {})
-                st.markdown(f'''
-                <div class="metrics-grid">
-                    <div class="metric-card">
-                        <div class="metric-value success">{s.get("passed", 0)}</div>
-                        <div class="metric-label">Passed</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-value danger">{s.get("failed", 0)}</div>
-                        <div class="metric-label">Failed</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-value warning">{s.get("warnings", 0)}</div>
-                        <div class="metric-label">Warnings</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-value primary">{s.get("total", 0)}</div>
-                        <div class="metric-label">Total</div>
-                    </div>
-                </div>
-                ''', unsafe_allow_html=True)
-                
-                # Validation Details
-                for sec_key, sec_data in results.get("sections", {}).items():
-                    section_name = sec_data.get("section_name", sec_key)
-                    icon = sec_data.get("icon", "📋")
-                    
-                    checks_html = ""
-                    for chk in sec_data.get("checks", []):
-                        status = chk["status"]
-                        badge_class = {"PASS": "badge-success", "FAIL": "badge-danger", "WARN": "badge-warning"}.get(status, "badge-info")
-                        checks_html += f'''
-                        <div class="validation-row">
-                            <span class="validation-name">{chk["name"]}</span>
-                            <div class="validation-values">
-                                <span class="validation-expected">Expected: {chk["expected"]}</span>
-                                <span class="validation-actual">Actual: {chk["actual"]}</span>
-                                <span class="badge {badge_class}">{status}</span>
-                            </div>
-                        </div>
-                        '''
-                    
-                    st.markdown(f'''
-                    <div class="validation-section">
-                        <div class="validation-section-header">{icon} {section_name}</div>
-                        {checks_html}
-                    </div>
-                    ''', unsafe_allow_html=True)
-                
-                # Overall Result
-                if results.get("overall_status") == "PASS":
-                    st.balloons()
-                    st.success("🎉 All validations passed successfully!")
-                elif results.get("overall_status") == "WARN":
-                    st.warning("⚠️ Passed with warnings")
-                else:
-                    st.error("❌ Some validations failed")
-    
-    # TAB 2: SCENARIOS
-    with tab2:
-        st.markdown('<div class="section-header"><span class="section-header-icon">📋</span> Common Test Scenarios</div>', unsafe_allow_html=True)
-        
-        cols = st.columns(2)
-        
-        for idx, (key, scn) in enumerate(COMMON_SCENARIOS.items()):
-            col = cols[idx % 2]
+            st.markdown("### Learned Patterns")
             
-            with col:
-                tags_html = "".join([f'<span class="tag">{t}</span>' for t in scn.get("tags", [])])
-                
+            if analyzer.analyzed_files:
                 st.markdown(f'''
-                <div class="scenario-card">
-                    <div class="scenario-header">
-                        <span class="scenario-icon">{scn.get("icon", "📄")}</span>
-                        <span class="scenario-title">{scn["name"]}</span>
-                    </div>
-                    <div class="scenario-desc">{scn["description"]}</div>
-                    <div class="scenario-tags">{tags_html}</div>
-                    <div style="margin-top: 0.75rem; font-size: 0.8rem; color: #6B7280;">
-                        Expected: <span class="badge badge-info">RC {scn["expected_response_code"]}</span>
-                        <span class="badge badge-info">{scn["expected_pph_status"]}</span>
-                    </div>
+                <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                    <span class="stat-pill">📄 {len(analyzer.analyzed_files)} Files</span>
+                    <span class="stat-pill">📝 {len(analyzer.step_patterns)} Steps</span>
                 </div>
                 ''', unsafe_allow_html=True)
                 
-                if st.button(f"▶️ Run", key=f"run_{key}", use_container_width=True):
-                    stan, rrn = generate_stan(), generate_rrn()
-                    ovr = scn["overrides"].copy()
-                    ovr["DE11"] = stan
-                    ovr["DE37"] = rrn
-                    
-                    full_scn = scn.copy()
-                    full_scn["overrides"] = ovr
-                    
-                    with st.spinner("Running scenario..."):
-                        cr = cosmos.send_transaction(scn["template"], ovr)
-                        pph = db.query_pph_tran(rrn, stan)
-                        ppdsva = db.query_ppdsva(rrn, stan)
-                        res = engine.run_full_validation(full_scn, cr, pph, ppdsva)
-                    
-                    if res.get("overall_status") == "PASS":
-                        st.success(f"✅ Passed - {res['summary']['passed']}/{res['summary']['total']} checks")
-                    else:
-                        st.error(f"❌ Failed - {res['summary']['failed']} failures")
+                with st.expander("Step Patterns"):
+                    for step, count in sorted(analyzer.step_patterns.items(), key=lambda x: -x[1])[:10]:
+                        st.code(f"({count}x) {step}")
+                
+                with st.expander("Analyzed Files"):
+                    for f in analyzer.analyzed_files:
+                        st.write(f"**{f['filename']}**: {len(f['scenarios'])} scenarios")
+            else:
+                st.info("Upload feature files to start learning")
     
-    # TAB 3: SQL SCHEMA
+    # ========== TAB 3: ADD TEMPLATES ==========
     with tab3:
-        st.markdown('<div class="section-header"><span class="section-header-icon">🗄️</span> Database Schema Reference</div>', unsafe_allow_html=True)
+        st.markdown("### Add Custom Templates")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("#### New Transaction Template")
+            
+            with st.form("add_template"):
+                t_id = st.text_input("Template ID*", placeholder="visa_purchase_ecom_0100")
+                t_name = st.text_input("Template Name*", placeholder="fwd_visa_purchase_ecom_0100")
+                t_desc = st.text_input("Description*", placeholder="Visa E-Commerce Purchase")
+                t_category = st.selectbox("Category", ["purchase", "withdrawal", "refund", "reversal", "balance", "cashback", "other"])
+                t_network = st.selectbox("Card Network", ["visa", "mastercard", "amex", "discover", "other"])
+                t_mti = st.selectbox("Message Type", ["0100", "0110", "0200", "0210", "0400", "0410", "0420"])
+                t_proc = st.text_input("Processing Code", "000000")
+                t_tags = st.text_input("Tags (comma separated)", "visa, purchase, ecom")
+                
+                st.markdown("**Default Fields** (JSON)")
+                t_fields = st.text_area("Fields", value='{\n  "DMTI": "0100",\n  "DE2": "4144779500060809",\n  "DE3": "000000",\n  "DE4": "000000000100"\n}', height=150)
+                
+                if st.form_submit_button("➕ Add Template", use_container_width=True):
+                    if t_id and t_name and t_desc:
+                        try:
+                            fields = json.loads(t_fields) if t_fields else {}
+                            tags = [t.strip() for t in t_tags.split(",") if t.strip()]
+                            
+                            template = TransactionTemplate(
+                                id=t_id,
+                                name=t_name,
+                                description=t_desc,
+                                category=t_category,
+                                card_network=t_network,
+                                message_type=t_mti,
+                                processing_code=t_proc,
+                                fields=fields,
+                                tags=tags
+                            )
+                            kb.add_template(template)
+                            st.success(f"✅ Added template: {t_name}")
+                        except json.JSONDecodeError:
+                            st.error("Invalid JSON in fields")
+                    else:
+                        st.warning("Please fill required fields")
+        
+        with col2:
+            st.markdown("#### Add Response Code")
+            
+            with st.form("add_rc"):
+                rc_code = st.text_input("Response Code*", placeholder="55")
+                rc_msg = st.text_input("Message*", placeholder="Invalid PIN")
+                rc_cat = st.selectbox("Category", ["approved", "declined", "error"])
+                rc_field = st.text_input("Trigger Field", placeholder="DE52")
+                rc_value = st.text_input("Trigger Value", placeholder="")
+                
+                if st.form_submit_button("➕ Add Response Code", use_container_width=True):
+                    if rc_code and rc_msg:
+                        rc = ResponseCode(rc_code, rc_msg, rc_cat, rc_field, rc_value)
+                        kb.add_response_code(rc)
+                        st.success(f"✅ Added RC: {rc_code} - {rc_msg}")
+            
+            st.markdown("---")
+            st.markdown("#### Add SQL Table")
+            
+            with st.form("add_table"):
+                tbl_name = st.text_input("Table Name*", placeholder="CUSTOM_TABLE")
+                tbl_desc = st.text_input("Description*", placeholder="Custom validation table")
+                tbl_keys = st.text_input("Key Columns (comma separated)", "RRN, STAN")
+                tbl_cols = st.text_area("Columns (JSON)", '{\n  "COL1": {"type": "VARCHAR2(50)", "desc": "Column 1"}\n}')
+                
+                if st.form_submit_button("➕ Add Table", use_container_width=True):
+                    if tbl_name and tbl_desc:
+                        try:
+                            cols = json.loads(tbl_cols) if tbl_cols else {}
+                            keys = [k.strip() for k in tbl_keys.split(",") if k.strip()]
+                            
+                            table = SQLTable(tbl_name, tbl_desc, cols, keys)
+                            kb.add_sql_table(table)
+                            st.success(f"✅ Added table: {tbl_name}")
+                        except json.JSONDecodeError:
+                            st.error("Invalid JSON")
+    
+    # ========== TAB 4: KNOWLEDGE BASE ==========
+    with tab4:
+        st.markdown("### Knowledge Base")
+        
+        st.markdown(f'''
+        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem;">
+            <span class="stat-pill">📄 {len(kb.templates)} Templates</span>
+            <span class="stat-pill">🔢 {len(kb.response_codes)} Response Codes</span>
+            <span class="stat-pill">🗄️ {len(kb.sql_tables)} SQL Tables</span>
+            <span class="stat-pill">📝 {len(kb.field_definitions)} Fields</span>
+        </div>
+        ''', unsafe_allow_html=True)
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown("### PPH_TRAN Table")
-            
-            rows_html = ""
-            for col_name, info in PPH_TRAN_SCHEMA["columns"].items():
-                rows_html += f'''
-                <div class="schema-row">
-                    <span class="schema-col">{col_name}</span>
-                    <span class="schema-type">{info["type"]}</span>
-                    <span class="schema-desc">{info["desc"]}</span>
-                </div>
-                '''
-            
-            st.markdown(f'''
-            <div class="schema-table">
-                <div class="schema-header">📋 {PPH_TRAN_SCHEMA["description"]}</div>
-                {rows_html}
-            </div>
-            ''', unsafe_allow_html=True)
+            st.markdown("#### Transaction Templates")
+            for tid, t in kb.templates.items():
+                with st.expander(f"{t.card_network.upper()} - {t.description}"):
+                    st.write(f"**ID:** {t.id}")
+                    st.write(f"**Name:** {t.name}")
+                    st.write(f"**Category:** {t.category}")
+                    st.write(f"**MTI:** {t.message_type}")
+                    st.write(f"**Tags:** {', '.join(t.tags)}")
+                    st.json(t.fields)
         
         with col2:
-            st.markdown("### PPDSVA Table")
+            st.markdown("#### Response Codes")
+            for code, rc in kb.response_codes.items():
+                color = "🟢" if rc.category == "approved" else ("🔴" if rc.category == "declined" else "🟡")
+                st.write(f"{color} **{code}** - {rc.message}")
             
-            rows_html = ""
-            for col_name, info in PPDSVA_SCHEMA["columns"].items():
-                rows_html += f'''
-                <div class="schema-row">
-                    <span class="schema-col">{col_name}</span>
-                    <span class="schema-type">{info["type"]}</span>
-                    <span class="schema-desc">{info["desc"]}</span>
-                </div>
-                '''
-            
-            st.markdown(f'''
-            <div class="schema-table">
-                <div class="schema-header">📊 {PPDSVA_SCHEMA["description"]}</div>
-                {rows_html}
-            </div>
-            ''', unsafe_allow_html=True)
-        
-        st.markdown("### Sample SQL Queries")
-        st.code("""
--- Query PPH_TRAN by RRN and STAN
-SELECT * FROM PPH_TRAN 
-WHERE RRN = :rrn AND STAN = :stan
-ORDER BY CREATED_DT DESC;
-
--- Query PPDSVA by RRN and STAN  
-SELECT * FROM PPDSVA 
-WHERE RRN = :rrn AND STAN = :stan
-ORDER BY CREATED_DT DESC;
-
--- Join PPH_TRAN and PPDSVA
-SELECT t.TRAN_ID, t.TXN_AMT, t.TXN_STATUS, t.RESP_CODE,
-       s.FRAUD_CHECK, s.RISK_SCORE, s.PROCESS_TIME_MS
-FROM PPH_TRAN t
-LEFT JOIN PPDSVA s ON t.TRAN_ID = s.TRAN_ID
-WHERE t.RRN = :rrn;
-        """, language="sql")
+            st.markdown("#### SQL Tables")
+            for name, tbl in kb.sql_tables.items():
+                with st.expander(name):
+                    st.write(f"**Description:** {tbl.description}")
+                    st.write(f"**Keys:** {', '.join(tbl.key_columns)}")
+                    for col, info in tbl.columns.items():
+                        st.write(f"- {col}: {info['type']}")
     
-    # TAB 4: KARATE
-    with tab4:
-        st.markdown('<div class="section-header"><span class="section-header-icon">📝</span> Karate Feature Generator</div>', unsafe_allow_html=True)
-        
-        st.markdown("Generate Karate `.feature` files with SQL validation for PPH_TRAN and PPDSVA tables.")
-        
-        if st.button("🔧 Generate Karate Feature", use_container_width=True):
-            feature = generate_karate_with_sql(selected_template, cosmos_url, db_config)
-            st.code(feature, language="gherkin")
-            st.download_button("📥 Download .feature", feature, f"{selected_template}_sql.feature", mime="text/plain")
-    
-    # TAB 5: PYTHON
+    # ========== TAB 5: EXPORT/IMPORT ==========
     with tab5:
-        st.markdown('<div class="section-header"><span class="section-header-icon">🐍</span> Python pytest Generator</div>', unsafe_allow_html=True)
+        st.markdown("### Export / Import Knowledge Base")
         
-        st.markdown("Generate Python pytest code with SQL validation for PPH_TRAN and PPDSVA tables.")
+        col1, col2 = st.columns(2)
         
-        if st.button("🐍 Generate Python Tests", use_container_width=True):
-            code = generate_pytest_with_sql(selected_template, cosmos_url, db_config)
-            st.code(code, language="python")
-            st.download_button("📥 Download .py", code, f"test_{selected_template}_sql.py", mime="text/x-python")
+        with col1:
+            st.markdown("#### Export")
+            if st.button("📤 Export to JSON", use_container_width=True):
+                json_data = kb.export_to_json()
+                st.download_button(
+                    "⬇️ Download JSON",
+                    json_data,
+                    "karate_knowledge_base.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+                st.code(json_data[:500] + "...", language="json")
+        
+        with col2:
+            st.markdown("#### Import")
+            uploaded_json = st.file_uploader("Upload JSON", type=["json"])
+            
+            if uploaded_json:
+                if st.button("📥 Import", use_container_width=True):
+                    try:
+                        content = uploaded_json.read().decode('utf-8')
+                        kb.import_from_json(content)
+                        st.success("✅ Imported successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
